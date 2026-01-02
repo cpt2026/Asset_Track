@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>我的投資儀表板</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #f9f9f9; }
+    h1, h2 { color: #2c3e50; }
+    .card { background: white; padding: 16px; margin: 16px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    input, button, textarea, select { padding: 8px; margin: 4px; font-size: 16px; }
+    button { background: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    button:hover { background: #2980b9; }
+    canvas { max-width: 100%; }
+    .asset-item { display: flex; gap: 8px; margin: 8px 0; align-items: center; }
+  </style>
+</head>
+<body>
+  <h1>?? 我的投資儀表板</h1>
+
+  <!-- 資產輸入區 -->
+  <div class="card">
+    <h2>新增/編輯投資標的</h2>
+    <div>
+      <input type="text" id="assetName" placeholder="資產名稱（如 AAPL、比特幣）" />
+      <select id="assetType">
+        <option value="stock">股票</option>
+        <option value="crypto">加密貨幣</option>
+        <option value="commodity">商品（黃金等）</option>
+        <option value="cash">現金/其他</option>
+      </select>
+    </div>
+    <div>
+      <input type="number" id="assetAmount" placeholder="數量（股數、數量等）" step="any" />
+      <input type="text" id="assetSymbol" placeholder="代號（用於查詢價格，如 BTC、GC=F）" />
+    </div>
+    <button onclick="addAsset()">新增資產</button>
+    <button onclick="clearAll()">?? 清除所有資料（僅本機）</button>
+  </div>
+
+  <!-- 資產列表與即時價格 -->
+  <div class="card">
+    <h2>我的投資組合</h2>
+    <div id="portfolioList"></div>
+    <p><strong>總資產價值（估算）：</strong> <span id="totalValue">NT$ 0</span></p>
+    <button onclick="saveSnapshot()">?? 記錄今日總值（用於趨勢圖）</button>
+  </div>
+
+  <!-- 資產配置圖 -->
+  <div class="card">
+    <h2>資產配置比例</h2>
+    <canvas id="allocationChart" height="200"></canvas>
+  </div>
+
+  <!-- 價值趨勢圖 -->
+  <div class="card">
+    <h2>投資組合價值趨勢</h2>
+    <canvas id="trendChart" height="150"></canvas>
+  </div>
+
+  <!-- 投資筆記 -->
+  <div class="card">
+    <h2>投資筆記</h2>
+    <textarea id="note" placeholder="在這裡記錄你的投資想法、策略或提醒..." rows="4" style="width:100%;"></textarea>
+    <button onclick="saveNote()">儲存筆記</button>
+  </div>
+
+  <script>
+    // ==========================
+    // 資料結構：所有資料存在 localStorage
+    // ==========================
+    let portfolio = JSON.parse(localStorage.getItem('portfolio') || '[]');
+    let snapshots = JSON.parse(localStorage.getItem('snapshots') || '[]');
+    let note = localStorage.getItem('investmentNote') || '';
+
+    // ==========================
+    // 初始化
+    // ==========================
+    document.getElementById('note').value = note;
+    loadPortfolio();
+
+    // ==========================
+    // 功能：新增資產
+    // ==========================
+    function addAsset() {
+      const name = document.getElementById('assetName').value.trim();
+      const type = document.getElementById('assetType').value;
+      const amount = parseFloat(document.getElementById('assetAmount').value);
+      const symbol = document.getElementById('assetSymbol').value.trim();
+
+      if (!name || isNaN(amount)) {
+        alert('請填寫完整資訊');
+        return;
+      }
+
+      portfolio.push({ name, type, amount, symbol, note: '' });
+      savePortfolio();
+      loadPortfolio();
+    }
+
+    // ==========================
+    // 功能：載入投資組合並取得即時價格
+    // ==========================
+    async function loadPortfolio() {
+      const listEl = document.getElementById('portfolioList');
+      listEl.innerHTML = '<p>正在載入即時價格...</p>';
+
+      if (portfolio.length === 0) {
+        listEl.innerHTML = '<p>尚未新增任何投資標的。</p>';
+        renderAllocationChart([]);
+        return;
+      }
+
+      let totalValue = 0;
+      const assetValues = [];
+
+      // 同時取得所有資產的即時價格
+      const pricePromises = portfolio.map(async (asset) => {
+        let price = 0;
+        let displayPrice = 'N/A';
+
+        try {
+          if (asset.type === 'crypto') {
+            // 使用 CoinGecko（支援比特幣、以太幣等）
+            const idMap = {
+              'BTC': 'bitcoin',
+              'ETH': 'ethereum',
+              // 可依需要擴充
+            };
+            const id = idMap[asset.symbol.toUpperCase()] || asset.symbol.toLowerCase();
+            const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=twd`);
+            const data = await res.json();
+            price = data[id]?.twd || 0;
+            displayPrice = price ? `NT$ ${price.toLocaleString()}` : 'N/A';
+          } 
+          else if (asset.type === 'commodity' && asset.symbol === 'GOLD') {
+            // 使用 GoldAPI（免費，需註冊取得金鑰，但我們用替代方案）
+            // 免金鑰方案：使用 Alpha Vantage 的數值金屬（這裡簡化為固定匯率估算）
+            // 實際可改用：https://www.goldapi.io/ （需金鑰）
+            // 此處以 1 盎司 ? NT$ 65,000 估算（僅示範）
+            price = 65000 / 31.1035; // 換算每公克
+            displayPrice = `NT$ ${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}/公克`;
+          }
+          else if (asset.type === 'stock') {
+            // 股票價格：使用 Yahoo Finance（透過 public proxy）
+            // 注意：Yahoo Finance 官方不提供免費 API，但有公開代理可用
+            // 以下使用 yfinance 的公開代理（非官方，但常見）
+            const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${asset.symbol}?region=TW&lang=zh-TW`);
+            const data = await res.json();
+            const close = data.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+            price = close?.[close.length - 1] || 0;
+            displayPrice = price ? `NT$ ${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : 'N/A';
+          }
+          else {
+            // 現金或其他：使用者手動輸入價值（此處設為 1）
+            price = 1;
+            displayPrice = `NT$ ${asset.amount.toLocaleString()}`;
+          }
+        } catch (e) {
+          console.error('取得價格失敗', asset, e);
+        }
+
+        const value = asset.type === 'cash' ? asset.amount : (price * asset.amount);
+        totalValue += value;
+        assetValues.push({ ...asset, price, value, displayPrice });
+
+        return { ...asset, price, value, displayPrice };
+      });
+
+      const updatedAssets = await Promise.all(pricePromises);
+
+      // 更新畫面
+      let html = '';
+      updatedAssets.forEach((asset, i) => {
+        html += `
+          <div class="asset-item">
+            <strong>${asset.name}</strong> (${asset.symbol || asset.type})
+            <span>數量: ${asset.amount}</span>
+            <span>市價: ${asset.displayPrice}</span>
+            <span>市值: NT$ ${asset.value.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+          </div>
+        `;
+      });
+      html += `<p><strong>總資產價值：NT$ ${totalValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></p>`;
+      listEl.innerHTML = html;
+      document.getElementById('totalValue').textContent = `NT$ ${totalValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+
+      // 儲存更新後的組合（含價格快取）
+      renderAllocationChart(updatedAssets);
+    }
+
+    // ==========================
+    // 功能：繪製資產配置餅圖
+    // ==========================
+    let allocationChart = null;
+    function renderAllocationChart(assets) {
+      const ctx = document.getElementById('allocationChart').getContext('2d');
+      if (allocationChart) allocationChart.destroy();
+
+      if (assets.length === 0) return;
+
+      const labels = assets.map(a => a.name);
+      const data = assets.map(a => a.value);
+      const backgroundColors = [
+        '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40'
+      ];
+
+      allocationChart = new Chart(ctx, {
+        type: 'pie',
+        data: {
+          labels: labels,
+          datasets: [{
+            data: data,
+            backgroundColor: backgroundColors
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { position: 'top' }
+          }
+        }
+      });
+    }
+
+    // ==========================
+    // 功能：記錄總值快照（用於趨勢圖）
+    // ==========================
+    function saveSnapshot() {
+      const totalEl = document.getElementById('totalValue').textContent;
+      const valueText = totalEl.replace(/[^0-9]/g, '');
+      const value = parseInt(valueText) || 0;
+      const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+
+      // 避免同一天重複記錄
+      const exists = snapshots.some(s => s.date === today);
+      if (exists) {
+        if (!confirm('今天已記錄過快照，是否覆蓋？')) return;
+        snapshots = snapshots.filter(s => s.date !== today);
+      }
+
+      snapshots.push({ date: today, value });
+      snapshots.sort((a, b) => a.date.localeCompare(b.date));
+      localStorage.setItem('snapshots', JSON.stringify(snapshots));
+      renderTrendChart();
+      alert('? 已記錄今日總值');
+    }
+
+    // ==========================
+    // 功能：繪製價值趨勢圖
+    // ==========================
+    let trendChart = null;
+    function renderTrendChart() {
+      const ctx = document  .getElementById('trendChart').getContext('2d');
+      if (trendChart) trendChart.destroy();
+
+      if (snapshots.length === 0) {
+        document.getElementById('trendChart').parentElement.innerHTML = '<p>尚未記錄任何總值快照。</p>';
+        return;
+      }
+
+      const labels = snapshots.map(s => s.date);
+      const data = snapshots.map(s => s.value);
+
+      trendChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: '投資組合總值 (NT$)',
+            data: data,
+            borderColor: '#36A2EB',
+            backgroundColor: 'rgba(54, 162, 235, 0.1)',
+            fill: true,
+            tension: 0.3
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { display: false }
+          },
+          scales: {
+            y: {
+              beginAtZero: false,
+              ticks: {
+                callback: (value) => 'NT$ ' + value.toLocaleString()
+              }
+            }
+          }
+        }
+      });
+    }
+
+    // 初始化趨勢圖
+    renderTrendChart();
+
+    // ==========================
+    // 功能：筆記與資料管理
+    // ==========================
+    function saveNote() {
+      const note = document.getElementById('note').value;
+      localStorage.setItem('investmentNote', note);
+      alert('? 筆記已儲存');
+    }
+
+    function savePortfolio() {
+      localStorage.setItem('portfolio', JSON.stringify(portfolio));
+    }
+
+    function clearAll() {
+      if (confirm('確定要清除所有投資資料、筆記和快照嗎？（此動作無法復原）')) {
+        localStorage.removeItem('portfolio');
+        localStorage.removeItem('snapshots');
+        localStorage.removeItem('investmentNote');
+        portfolio = [];
+        snapshots = [];
+        document.getElementById('note').value = '';
+        loadPortfolio();
+        renderTrendChart();
+      }
+    }
+
+    // 自動每 5 分鐘重新整理價格（可選）
+    // setInterval(loadPortfolio, 5 * 60 * 1000);
+  </script>
+</body>
+</html>
